@@ -125,6 +125,30 @@ jobs:
         with:
           submodules: recursive
 
+      # One fixed debug key for every fork build, so `adb install -r` can
+      # update the app in place. The keystore lives only in this secret.
+      # Runs early so a wrong key fails in seconds, not after the full build.
+      - name: Install fork debug keystore
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_B64 }}
+          EXPECTED_SHA256: "0D:0F:35:12:10:16:57:DD:43:56:1B:35:38:13:76:48:35:90:02:4F:6B:10:5A:CA:E6:25:BB:4A:A4:1B:A2:F0"
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::Secret ANDROID_DEBUG_KEYSTORE_B64 is not set"
+            exit 1
+          fi
+          mkdir -p ~/.android
+          echo "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+          echo "HOME=$HOME ANDROID_USER_HOME=${ANDROID_USER_HOME:-} ANDROID_SDK_HOME=${ANDROID_SDK_HOME:-} ANDROID_PREFS_ROOT=${ANDROID_PREFS_ROOT:-}"
+          ls -la ~/.android
+          actual=$(keytool -list -v -keystore ~/.android/debug.keystore -storepass android | grep -oE "SHA256: [0-9A-F:]+" | head -1 | cut -d' ' -f2)
+          echo "keystore SHA256: $actual"
+          if [ "$actual" != "$EXPECTED_SHA256" ]; then
+            echo "::error::Fork debug keystore fingerprint does not match"
+            exit 1
+          fi
+
       - name: Check JNI natives are in ffi.FFI
         # Custom clients rename com.carriez.flutter_hbb; only ffi.FFI keeps its name.
         shell: bash
@@ -246,20 +270,6 @@ jobs:
           name: librustdesk.so.${{ matrix.job.target }}
           path: ./target/${{ matrix.job.target }}/release/liblibrustdesk.so
 
-      # One fixed debug key for every fork build, so `adb install -r` can
-      # update the app in place. The keystore lives only in this secret.
-      - name: Install fork debug keystore
-        shell: bash
-        env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_B64 }}
-        run: |
-          if [ -z "$KEYSTORE_B64" ]; then
-            echo "::error::Secret ANDROID_DEBUG_KEYSTORE_B64 is not set"
-            exit 1
-          fi
-          mkdir -p ~/.android
-          echo "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
-
       - name: Build rustdesk
         shell: bash
         env:
@@ -311,6 +321,8 @@ jobs:
           popd
           mkdir -p signed-apk; pushd signed-apk
           mv ../rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk .
+          ls -la ~/.android
+          keytool -printcert -jarfile rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk | grep -E "SHA256:"
 
       # https://github.com/r0adkll/sign-android-release/issues/84#issuecomment-1889636075
       - name: Upload debug-signed APK
