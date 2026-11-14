@@ -116,6 +116,9 @@ class InputService : AccessibilityService() {
     }
     private val touchSlop: Int by lazy { ViewConfiguration.get(this).scaledTouchSlop }
     @Volatile private var tvTapPending = false
+    // Set when holding the left button on Android TV long-clicked the view
+    // under the pointer; the release then does nothing.
+    @Volatile private var tvLongPressed = false
     private var tvTapDownX = 0
     private var tvTapDownY = 0
     // On Android TV a drag scrolls with accessibility actions, because the
@@ -169,18 +172,34 @@ class InputService : AccessibilityService() {
                 override fun run() {
                     if (isWaitingLongPress && !tvDragScroll) {
                         isWaitingLongPress = false
-                        tvTapPending = false
+                        if (tvTapPending) {
+                            tvTapPending = false
+                            if (tryLongClickNodeAt(tvTapDownX, tvTapDownY)) {
+                                tvLongPressed = true
+                                return
+                            }
+                        }
                         continueGesture(mouseX, mouseY)
                     }
                 }
             }, longPressDuration)
 
             leftIsDown = true
+            tvLongPressed = false
             startGesture(mouseX, mouseY)
             if (isTv) {
                 tvTapPending = true
                 tvTapDownX = mouseX
                 tvTapDownY = mouseY
+            }
+            return
+        }
+
+        // After a TV long click, ignore the rest of the press.
+        if (leftIsDown && tvLongPressed) {
+            if (mask == LEFT_UP) {
+                tvLongPressed = false
+                leftIsDown = false
             }
             return
         }
@@ -250,6 +269,11 @@ class InputService : AccessibilityService() {
         }
 
         if (mask == RIGHT_UP) {
+            // On Android TV a right click long-clicks the view under the
+            // pointer, like holding the remote's select button.
+            if (isTv && tryLongClickNodeAt(mouseX, mouseY)) {
+                return
+            }
             longPress(mouseX, mouseY)
             return
         }
@@ -738,6 +762,39 @@ class InputService : AccessibilityService() {
         }
         Log.d(logTag, "tv click x:$x y:$y node:${node.className} $bounds ok:$ok")
         return ok
+    }
+
+    // Long-clicks the view under (x, y) with accessibility actions, which
+    // opens the item's menu on Android TV (for example app options on the
+    // home screen). Returns false when no view under the pointer accepts it.
+    private fun tryLongClickNodeAt(x: Int, y: Int): Boolean {
+        val node = findClickableNodeAt(x, y) ?: return false
+        val item = if (isCollection(node)) childAt(node, x, y) else null
+        for (target in listOfNotNull(item, node)) {
+            if (target.isFocusable() && !target.isFocused()) {
+                target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            }
+            // Views often handle the long click on a parent of the node that
+            // takes the click, so walk up a few levels.
+            var current: AccessibilityNodeInfo? = target
+            var depth = 0
+            val rect = Rect()
+            while (current != null && depth < 3) {
+                current.getBoundsInScreen(rect)
+                if (isScreenSized(rect)) {
+                    break
+                }
+                if (current.isLongClickable() &&
+                    current.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
+                    Log.d(logTag, "tv long click x:$x y:$y node:${current.className} ok:true")
+                    return true
+                }
+                current = current.parent
+                depth++
+            }
+        }
+        Log.d(logTag, "tv long click x:$x y:$y node:${node.className} ok:false")
+        return false
     }
 
     private fun findClickableNodeAt(x: Int, y: Int): AccessibilityNodeInfo? {
