@@ -8,7 +8,9 @@ package com.carriez.flutter_hbb
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.UiModeManager
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Path
 import android.os.Build
 import android.os.Bundle
@@ -97,6 +99,12 @@ class InputService : AccessibilityService() {
     private var mouseY = 0
     private var timer = Timer()
     private var recentActionTask: TimerTask? = null
+
+    // D-pad key mapping below applies only to Android TV.
+    private val isTv: Boolean by lazy {
+        val uiModeManager = getSystemService(UI_MODE_SERVICE) as? UiModeManager
+        uiModeManager?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
+    }
     // 100(tap timeout) + 400(long press timeout)
     private val longPressDuration = ViewConfiguration.getTapTimeout().toLong() + ViewConfiguration.getLongPressTimeout().toLong()
 
@@ -474,6 +482,8 @@ class InputService : AccessibilityService() {
                 return
             } else if (tryHandlePowerKeyEvent(event)) {
                 return
+            } else if (tryHandleDpadKeyEvent(event)) {
+                return
             }
         }
 
@@ -551,6 +561,46 @@ class InputService : AccessibilityService() {
             return true
         }
         return false
+    }
+
+    // Android TV moves focus with D-pad keys, but an accessibility service
+    // cannot inject key events outside a text field. On Android TV with
+    // Android 13+, map arrow and Enter keys to D-pad global actions and
+    // Escape to Back. All other devices return false here, so their key
+    // handling is unchanged.
+    // When a text field has input focus, arrow and Enter keys keep the
+    // existing path (caret movement, IME action). Escape still maps to Back,
+    // because a TV has no other way to close the on-screen keyboard.
+    private fun tryHandleDpadKeyEvent(event: KeyEventAndroid): Boolean {
+        if (!isTv || Build.VERSION.SDK_INT < 33) {
+            return false
+        }
+        val action = when (event.keyCode) {
+            KeyEventAndroid.KEYCODE_DPAD_UP -> GLOBAL_ACTION_DPAD_UP
+            KeyEventAndroid.KEYCODE_DPAD_DOWN -> GLOBAL_ACTION_DPAD_DOWN
+            KeyEventAndroid.KEYCODE_DPAD_LEFT -> GLOBAL_ACTION_DPAD_LEFT
+            KeyEventAndroid.KEYCODE_DPAD_RIGHT -> GLOBAL_ACTION_DPAD_RIGHT
+            KeyEventAndroid.KEYCODE_DPAD_CENTER,
+            KeyEventAndroid.KEYCODE_ENTER,
+            KeyEventAndroid.KEYCODE_NUMPAD_ENTER -> GLOBAL_ACTION_DPAD_CENTER
+            KeyEventAndroid.KEYCODE_ESCAPE -> GLOBAL_ACTION_BACK
+            else -> return false
+        }
+        if (action != GLOBAL_ACTION_BACK && isEditableFocused()) {
+            return false
+        }
+        // Act on key down only, so one press moves focus once.
+        // Key repeat sends more key downs while the key is held.
+        if (event.action == KeyEventAndroid.ACTION_DOWN) {
+            val ok = performGlobalAction(action)
+            Log.d(logTag, "dpad keyCode:${event.keyCode} globalAction:$action ok:$ok")
+        }
+        return true
+    }
+
+    private fun isEditableFocused(): Boolean {
+        val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+        return node.isEditable()
     }
 
     private fun insertAccessibilityNode(list: LinkedList<AccessibilityNodeInfo>, node: AccessibilityNodeInfo) {
